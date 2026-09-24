@@ -19,7 +19,7 @@ This plugin work in progress and supported by Github Issues only at this time, w
 
 | Command | Description |
 |---|---|
-| `/create` | Create, structure, and push a new CLI-authored Copilot Studio agent from a natural-language description. |
+| `/create` | Create and push a new CLI-authored Copilot Studio agent from instructions or a business scenario, with optional guided component design. |
 | `/migrate` | Migrate a classic Copilot Studio agent to the new agentic-loop architecture. |
 | `/add-knowledge` | Add public website, SharePoint, OneDrive, or uploaded-file knowledge to a local agent. |
 | `/chat` | Chat with and test a locally cloned CLI-authored agent. |
@@ -28,7 +28,7 @@ This plugin work in progress and supported by Github Issues only at this time, w
 
 | Skill | Description |
 |---|---|
-| `create-copilot-studio-agent` | Reusable procedure for creating, structuring, validating, and pushing a new CLI-authored Copilot Studio agent. It is loaded automatically for matching requests and is also the implementation behind `/create`. |
+| `create-copilot-studio-agent` | Reusable procedure for instructions-only creation or optional guided design across skills, tools and workflows, instructions, data and knowledge, and settings. It is also the implementation behind `/create`. |
 
 ## Trademarks
 

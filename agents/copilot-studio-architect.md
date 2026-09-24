@@ -8,7 +8,9 @@ description: >
 
 ## 1. What the mechanism does
 
-The mechanism receives a very detailed natural-language description and transforms that idea into a working Copilot Studio CLI project:
+The mechanism receives a natural-language business problem, scenario, or set of instructions and
+transforms it into a working Copilot Studio CLI project. The description may be minimal for a basic
+instructions-only agent or detailed for a richer design:
 
 ```text
 Agent
@@ -91,7 +93,9 @@ The mechanism’s job is to separate these concerns.
 For every implementation, require:
 
 1. Target agent project directory, already initialized by `pac copilot init` in `cli-copilot` authoring mode.
-2. A behavior description detailed enough to identify the agent's role, core jobs, tone, clarification policy, knowledge needs, live-data needs, external actions, and safety constraints.
+2. A behavior description containing at least enough information to write meaningful global
+   instructions. For a basic creation request, the user's original instructions are sufficient;
+   skills, tools, knowledge, integrations, and custom settings are optional.
 
 For a new agent, the behavior description may come directly from the user's request. A Copilot Studio Describer report is not required.
 
@@ -104,7 +108,13 @@ For a migration, also require:
 
 If the target directory has not been initialized, stop and route initialization to the Copilot Studio Init agent. Do not imitate initialization by creating `settings.mcs.yml`, `agent.sync.yaml`, or `.mcs\` manually.
 
-If the target project directory or behavior description is missing, ask for the missing value and stop. For a migration, also stop when the describer report is missing. If optional source files or unsupported action details are missing, continue with reasonable assumptions and list the gap in the final response.
+If the target project directory or all behavior/instruction text is missing, ask for the missing
+value and stop. Do not require a detailed component specification for a new agent. When the caller
+selects an instructions-only path or says the user declined elaboration, continue with reasonable
+non-risky assumptions and do not ask for optional skills, tools, knowledge, integrations, or custom
+settings. For a migration, also stop when the describer report is missing. If optional source files
+or unsupported action details are missing, continue with reasonable assumptions and list the gap in
+the final response.
 
 ## Project preflight
 
@@ -374,7 +384,19 @@ Apply the project preflight above. Read the exact `schemaName`, inventory existi
 
 ## Phase 1: Normalize the idea
 
-Normalize into intents, extract constraints, reason about edge cases, identify user stories, and ask clarifying questions if needed.
+Normalize into intents, extract constraints, reason about edge cases, and identify user stories.
+Reuse every relevant detail already present in the request. When guided scenario design is desired,
+ask targeted questions only for material gaps in:
+
+- Skills
+- Tools and workflows
+- Instructions
+- Data and knowledge, including concrete SharePoint locations, URLs, or files
+- Settings
+
+Do not repeat answered questions or make every category mandatory. If the caller selected the basic
+instructions-only path, the user declined elaboration, or the user said "just go", do not ask
+optional design questions.
 
 ## Phase 2: Classify each intent
 
@@ -387,6 +409,10 @@ The mechanism should infer or ask about integrations. Then it should think what 
 ## Phase 4: Implement components
 
 Write or update the components stated above, with detailed descriptions, metadata, and instructions. Before creating each component, reason through why it is needed and why it belongs in instructions, a skill, a tool, knowledge, or another supported file type. Do not put reasoning notes in project files.
+
+Always implement meaningful global instructions. Create skills, tools, knowledge, and custom
+settings only when justified by the request or guided design. Never create default topics or
+topic-equivalent deterministic conversation routing; topics are not part of the new agent model.
 
 For every new component:
 
@@ -434,7 +460,10 @@ Before returning control to the caller:
 
 # 8. How to handle ambiguous natural language
 
-Natural-language specs are often vague. The mechanism should ask clarifying questions, and/or make reasonable assumptions (surfacing them).
+Natural-language specs are often vague. For guided scenario design, ask targeted clarification
+questions and/or make reasonable assumptions, surfacing those assumptions. Clarification is an
+optional enrichment step for new agents, not a prerequisite: an instructions-only request must
+still produce a valid base agent when the user declines elaboration.
 
 Example input:
 

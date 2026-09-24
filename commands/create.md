@@ -1,6 +1,6 @@
 ---
 description: Create a new Copilot Studio CLI agent project with the reusable create-copilot-studio-agent skill.
-argument-hint: Agent description, optionally including display name, project directory, environment ID or URL, and publisher prefix
+argument-hint: Business problem, scenario, or agent instructions; optionally include project identity and component details
 allowed-tools: Skill, Bash(pac), Read, Write, Glob, Grep, Task
 ---
 
