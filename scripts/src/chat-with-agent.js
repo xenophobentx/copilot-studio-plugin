@@ -40,7 +40,12 @@ const yaml = require("js-yaml");
 const { PublicClientApplication } = require("@azure/msal-node");
 const { CopilotStudioClient } = require("@microsoft/agents-copilotstudio-client");
 const { Activity } = require("@microsoft/agents-activity");
-const { createCachePluginWithFallback } = require("./msal-cache");
+const {
+  agentCacheAccountName,
+  createCachePluginWithFallback,
+  pickAccount,
+  tenantCacheAccountName,
+} = require("./msal-cache");
 const { summarizeTurn } = require("./response-format");
 const { createLiveRenderer } = require("./terminal-render");
 
@@ -369,24 +374,20 @@ function loadAgentConfig(agentDir) {
 }
 
 // ---------------------------------------------------------------------------
-// Authentication (MSAL device-code with a per-agent file cache)
+// Authentication (MSAL device-code with a per-tenant token cache)
 // ---------------------------------------------------------------------------
 
-function tokenCachePath(agentId) {
+// Plaintext fallback cache file. `name` is "tenant-<TenantId>" for the shared cache, or the agent
+// id for the old per-agent cache.
+function tokenCachePath(name) {
   const dir = path.join(resolvePluginDataDir(), "token-cache");
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch {
     // best effort
   }
-  const safe = (agentId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const safe = (name || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
   return path.join(dir, `${safe}.json`);
-}
-
-// Per-agent slot name for the encrypted OS-keychain token cache.
-function cacheAccountName(agentId) {
-  const safe = (agentId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `chat-${safe}`;
 }
 
 // MSAL-node masks a failed /devicecode request (e.g. the app registration does not exist in this
@@ -424,20 +425,32 @@ async function diagnoseDeviceCodeFailure({ authority, clientId, scope }) {
   return null;
 }
 
-async function getAccessToken({ tenantId, clientId, scope, accountName, fallbackCachePath }) {
+async function getAccessToken({ tenantId, clientId, scope, agentId }) {
   const authority = `https://login.microsoftonline.com/${tenantId}`;
-  const cachePlugin = await createCachePluginWithFallback(accountName, fallbackCachePath, log);
+  // One cache per tenant, so signing in once covers every agent in the tenant. An empty tenant
+  // cache is seeded from this agent's old per-agent cache, if it has one.
+  const legacyCache = {
+    accountName: agentCacheAccountName(agentId),
+    fallbackPath: tokenCachePath(agentId),
+    tenantId,
+  };
+  const cachePlugin = await createCachePluginWithFallback(
+    tenantCacheAccountName(tenantId),
+    tokenCachePath(`tenant-${tenantId}`),
+    log,
+    legacyCache
+  );
 
   const app = new PublicClientApplication({
     auth: { clientId, authority },
     cache: { cachePlugin },
   });
 
-  const accounts = await app.getTokenCache().getAllAccounts();
-  if (accounts.length > 0) {
+  const account = pickAccount(await app.getTokenCache().getAllAccounts(), tenantId);
+  if (account) {
     try {
-      const result = await app.acquireTokenSilent({ scopes: [scope], account: accounts[0] });
-      log("Using cached token.");
+      const result = await app.acquireTokenSilent({ scopes: [scope], account });
+      log(`Using cached token (${account.username}).`);
       return result.accessToken;
     } catch {
       // fall through to device code
@@ -716,13 +729,12 @@ async function main() {
   log(`Cloud: ${cloud}`);
   log(`Direct connect URL: ${directConnectUrl}`);
 
-  log("Authenticating (device code)...");
+  log("Authenticating...");
   const token = await getAccessToken({
     tenantId: config.tenantId,
     clientId,
     scope,
-    accountName: cacheAccountName(config.agentId),
-    fallbackCachePath: tokenCachePath(config.agentId),
+    agentId: config.agentId,
   });
 
   // Auth succeeded, so this client id is valid for the tenant — persist it for future runs.

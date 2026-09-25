@@ -120,8 +120,9 @@ Invoke the bundled script. By default it emits a single distilled JSON summary o
   ```
 
   Add `--client-id "<appId>"` on the very first run if it was just provided (subsequent runs reuse
-  the saved id). The script prints a device-code login prompt to stderr the first time — relay it to
-  the user and wait for them to complete sign-in.
+  the saved id). The script prints a device-code login prompt to stderr the first time you chat with
+  an agent in a tenant — relay it to the user and wait for them to complete sign-in. Later chats with
+  any agent in the same tenant reuse that sign-in, as long as they use the same app id.
 
 - **Follow-up turns** (continue the same conversation): pass the `conversation_id` from the previous
   turn's JSON:
@@ -187,11 +188,21 @@ same `--conversation-id`, until the user is done.
 - **What this command does not do.** It does not author, edit, publish, or manage the agent, and it
   does not use Direct Line. It only chats with an already-published CLI agent. Use `/migrate` or the
   manage agent for those tasks.
-- **Auth footprint.** Access and refresh tokens are cached **per-agent in OS-native encrypted
-  storage** (macOS Keychain / Windows DPAPI / Linux libsecret) via `@azure/msal-node-extensions`;
-  the on-disk `~/.copilot-studio-cli/chat-<AgentId>.cache.json` holds no readable token. The native
-  dependencies are installed automatically into `<pluginData>` at session start. If they can't be
-  loaded (e.g. a standalone run before provisioning), the script **falls back to a plaintext token
-  cache** under `<pluginData>/token-cache/` and prints a warning. Nothing is written into the
-  agent's `.mcs/` folder. The app id, tenant id, and environment id are not secrets (public client,
-  no secret), so they are stored as plain JSON in `<pluginData>/chat-config.json`.
+- **Auth footprint.** Access and refresh tokens are cached **per-tenant in OS-native encrypted
+  storage** (macOS Keychain / Windows DPAPI / Linux libsecret) via `@azure/msal-node-extensions`, so
+  one sign-in covers every agent in the tenant that uses the same app registration (and
+  `verify-knowledge-access` shares the same cache). The on-disk
+  `~/.copilot-studio-cli/chat-tenant-<TenantId>.cache.json` holds no readable token on macOS and
+  Windows; on Linux without a working libsecret, msal-node-extensions stores the cache in that file
+  as plaintext. Earlier versions cached per agent (`chat-<AgentId>`); if the tenant cache is still
+  empty, that agent's old cache is copied into it (if it holds an account of that tenant), so
+  upgrading usually does not ask for a new sign-in. The old per-agent entries are left in place: keychain or libsecret items named
+  `chat-<AgentId>`, `~/.copilot-studio-cli/chat-<AgentId>.cache.json` files (the tokens themselves
+  on Windows), and any `<pluginData>/token-cache/<AgentId>.json` fallback files. Delete them if you
+  no longer need them. When the cache is reused, stderr shows which account it signed in as. The
+  native dependencies are installed automatically into `<pluginData>` at session start. If they
+  can't be loaded (e.g. a standalone run before provisioning), the script **falls back to a
+  plaintext token cache** under `<pluginData>/token-cache/` and prints a warning. Nothing is
+  written into the agent's `.mcs/` folder. The app id, tenant id, and environment id are not
+  secrets (public client, no secret), so they are stored as plain JSON in
+  `<pluginData>/chat-config.json`.

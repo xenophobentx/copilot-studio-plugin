@@ -2,30 +2,30 @@
  * MSAL persistence that never permits a plaintext fallback.
  */
 
-const os = require("os");
-const path = require("path");
+const { createCachePlugin } = require("./msal-cache");
 
-const CACHE_DIR = path.join(os.homedir(), ".copilot-studio-cli");
-const SERVICE_NAME = "copilot-studio-cli";
-
+/**
+ * @param {string} accountName Cache slot (e.g. tenantCacheAccountName(tenantId)).
+ * @param {() => object} [loadDependencies] For tests.
+ * @param {object} [options]
+ * @param {string} [options.legacyAccountName] Old per-agent slot to seed an empty slot from.
+ * @param {string} [options.tenantId] Only seed from a legacy slot with an account of this tenant.
+ * @param {(msg: string) => void} [options.warn]
+ * @param {string} [options.cacheDir] For tests.
+ */
 async function createSecureCachePlugin(
   accountName,
-  loadDependencies = () => require("@azure/msal-node-extensions")
+  loadDependencies = () => require("@azure/msal-node-extensions"),
+  options = {}
 ) {
-  const {
-    PersistenceCreator,
-    PersistenceCachePlugin,
-    DataProtectionScope,
-  } = loadDependencies();
-
-  const persistence = await PersistenceCreator.createPersistence({
-    cachePath: path.join(CACHE_DIR, `${accountName}.cache.json`),
-    dataProtectionScope: DataProtectionScope.CurrentUser,
-    serviceName: SERVICE_NAME,
-    accountName,
+  return createCachePlugin(accountName, {
+    legacyAccountName: options.legacyAccountName,
+    tenantId: options.tenantId,
+    warn: options.warn,
     usePlaintextFileOnLinux: false,
+    loadDependencies,
+    cacheDir: options.cacheDir,
   });
-  return new PersistenceCachePlugin(persistence);
 }
 
 module.exports = { createSecureCachePlugin };

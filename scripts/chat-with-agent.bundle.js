@@ -36924,21 +36924,140 @@ var require_msal_cache = __commonJS({
     var path2 = require("path");
     var CACHE_DIR = path2.join(os2.homedir(), ".copilot-studio-cli");
     var SERVICE_NAME = "copilot-studio-cli";
-    async function createCachePlugin(accountName) {
-      const {
-        PersistenceCreator,
-        PersistenceCachePlugin,
-        DataProtectionScope
-      } = require("@azure/msal-node-extensions");
-      const cachePath = path2.join(CACHE_DIR, `${accountName}.cache.json`);
-      const persistence = await PersistenceCreator.createPersistence({
-        cachePath,
+    function slotPart(value) {
+      return String(value || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
+    }
+    function tenantCacheAccountName2(tenantId) {
+      return `chat-tenant-${slotPart(tenantId)}`;
+    }
+    function agentCacheAccountName2(agentId) {
+      return `chat-${slotPart(agentId)}`;
+    }
+    function cacheFilePath(accountName, cacheDir = CACHE_DIR) {
+      return path2.join(cacheDir, `${accountName}.cache.json`);
+    }
+    function accountTenants(account) {
+      const profiles = Array.isArray(account.tenantProfiles) ? account.tenantProfiles : [];
+      const tenants = profiles.map((profile) => {
+        try {
+          return (typeof profile === "string" ? JSON.parse(profile) : profile).tenantId;
+        } catch {
+          return void 0;
+        }
+      });
+      return [account.realm, ...tenants].map((t) => String(t || "").toLowerCase()).filter(Boolean);
+    }
+    function cacheHasAccount(serialized, tenantId) {
+      if (!serialized) return false;
+      try {
+        const account = JSON.parse(serialized).Account;
+        if (!account || typeof account !== "object") return false;
+        const accounts = Object.values(account);
+        if (!tenantId) return accounts.length > 0;
+        const tenant = String(tenantId).toLowerCase();
+        return accounts.some((a) => a && accountTenants(a).includes(tenant));
+      } catch {
+        return false;
+      }
+    }
+    function pickAccount2(accounts, tenantId) {
+      if (!accounts || accounts.length === 0) return null;
+      const tenant = String(tenantId || "").toLowerCase();
+      return accounts.find((a) => a && String(a.tenantId || "").toLowerCase() === tenant) || accounts[0];
+    }
+    var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    async function withLockFile(lockPath, fn, { retries = 50, delayMs = 100 } = {}) {
+      let handle;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          handle = await fs2.promises.open(lockPath, "wx+");
+          break;
+        } catch (e) {
+          if (e.code !== "EEXIST" && e.code !== "EPERM" || attempt >= retries) throw e;
+          await sleep(delayMs);
+        }
+      }
+      try {
+        await handle.write(String(process.pid));
+        return await fn();
+      } finally {
+        await handle.close();
+        await fs2.promises.unlink(lockPath).catch(() => {
+        });
+      }
+    }
+    async function seedFromLegacyCache({ target, legacy, tenantId, lockPath, warn, lockOptions }) {
+      const copy = async () => {
+        if (cacheHasAccount(await target.load())) return false;
+        const data = await legacy.load();
+        if (!cacheHasAccount(data, tenantId)) return false;
+        await target.save(data);
+        return true;
+      };
+      try {
+        return lockPath ? await withLockFile(lockPath, copy, lockOptions) : await copy();
+      } catch (e) {
+        if (typeof warn === "function") {
+          warn(`Could not reuse the previous per-agent sign-in (${e && e.message ? e.message : e}).`);
+        }
+        return false;
+      }
+    }
+    async function createEncryptedPersistence(extensions, accountName, usePlaintextFileOnLinux, cacheDir) {
+      const { PersistenceCreator, DataProtectionScope } = extensions;
+      return PersistenceCreator.createPersistence({
+        cachePath: cacheFilePath(accountName, cacheDir),
         dataProtectionScope: DataProtectionScope.CurrentUser,
         serviceName: SERVICE_NAME,
         accountName,
-        usePlaintextFileOnLinux: true
+        usePlaintextFileOnLinux
       });
-      return new PersistenceCachePlugin(persistence);
+    }
+    async function createCachePlugin(accountName, options = {}) {
+      const {
+        legacyAccountName,
+        tenantId,
+        usePlaintextFileOnLinux = true,
+        warn,
+        loadDependencies = () => require("@azure/msal-node-extensions"),
+        cacheDir = CACHE_DIR
+      } = options;
+      const extensions = loadDependencies();
+      const persistence = await createEncryptedPersistence(
+        extensions,
+        accountName,
+        usePlaintextFileOnLinux,
+        cacheDir
+      );
+      if (legacyAccountName && legacyAccountName !== accountName && fs2.existsSync(cacheFilePath(legacyAccountName, cacheDir))) {
+        let signedIn = false;
+        try {
+          signedIn = cacheHasAccount(await persistence.load());
+        } catch {
+        }
+        try {
+          if (!signedIn) {
+            const legacy = await createEncryptedPersistence(
+              extensions,
+              legacyAccountName,
+              usePlaintextFileOnLinux,
+              cacheDir
+            );
+            await seedFromLegacyCache({
+              target: persistence,
+              legacy,
+              tenantId,
+              lockPath: `${persistence.getFilePath()}.lockfile`,
+              warn
+            });
+          }
+        } catch (e) {
+          if (typeof warn === "function") {
+            warn(`Could not reuse the previous per-agent sign-in (${e && e.message ? e.message : e}).`);
+          }
+        }
+      }
+      return new extensions.PersistenceCachePlugin(persistence);
     }
     function createPlaintextCachePlugin(cachePath) {
       try {
@@ -36958,22 +37077,50 @@ var require_msal_cache = __commonJS({
         }
       };
     }
-    async function createCachePluginWithFallback2(accountName, fallbackPath, warn) {
+    function plaintextFileStore(filePath) {
+      return {
+        load: async () => fs2.existsSync(filePath) ? fs2.readFileSync(filePath, "utf-8") : null,
+        save: async (contents) => {
+          fs2.mkdirSync(path2.dirname(filePath), { recursive: true });
+          fs2.writeFileSync(filePath, contents);
+        }
+      };
+    }
+    async function createCachePluginWithFallback2(accountName, fallbackPath, warn, legacy = {}, loadDependencies) {
       try {
-        return await createCachePlugin(accountName);
+        return await createCachePlugin(accountName, {
+          legacyAccountName: legacy.accountName,
+          tenantId: legacy.tenantId,
+          warn,
+          loadDependencies
+        });
       } catch (e) {
         if (typeof warn === "function") {
           warn(
             `Encrypted token storage unavailable (@azure/msal-node-extensions could not be loaded: ${e && e.message ? e.message : e}). Falling back to a plaintext token cache. Run a fresh session so the plugin can install its native dependencies, or reinstall the plugin, to enable OS-keychain encryption.`
           );
         }
+        if (legacy.fallbackPath && legacy.fallbackPath !== fallbackPath) {
+          await seedFromLegacyCache({
+            target: plaintextFileStore(fallbackPath),
+            legacy: plaintextFileStore(legacy.fallbackPath),
+            tenantId: legacy.tenantId,
+            warn
+          });
+        }
         return createPlaintextCachePlugin(fallbackPath);
       }
     }
     module2.exports = {
+      agentCacheAccountName: agentCacheAccountName2,
+      cacheHasAccount,
       createCachePlugin,
       createPlaintextCachePlugin,
       createCachePluginWithFallback: createCachePluginWithFallback2,
+      pickAccount: pickAccount2,
+      seedFromLegacyCache,
+      tenantCacheAccountName: tenantCacheAccountName2,
+      withLockFile,
       CACHE_DIR,
       SERVICE_NAME
     };
@@ -37269,7 +37416,12 @@ var yaml = require_js_yaml();
 var { PublicClientApplication } = require_msal_node();
 var { CopilotStudioClient } = require_src6();
 var { Activity } = require_src5();
-var { createCachePluginWithFallback } = require_msal_cache();
+var {
+  agentCacheAccountName,
+  createCachePluginWithFallback,
+  pickAccount,
+  tenantCacheAccountName
+} = require_msal_cache();
 var { summarizeTurn } = require_response_format();
 var { createLiveRenderer } = require_terminal_render();
 var CLI_RECOGNIZER_KINDS = ["CLIAgentRecognizer", "CLICopilotRecognizer"];
@@ -37517,18 +37669,14 @@ function loadAgentConfig(agentDir) {
   if (!schemaName) die("schemaName not found in settings.mcs.yml");
   return { environmentId, tenantId, agentId, schemaName, conn, displayName: settings.displayName };
 }
-function tokenCachePath(agentId) {
+function tokenCachePath(name) {
   const dir = path.join(resolvePluginDataDir(), "token-cache");
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch {
   }
-  const safe = (agentId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const safe = (name || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
   return path.join(dir, `${safe}.json`);
-}
-function cacheAccountName(agentId) {
-  const safe = (agentId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `chat-${safe}`;
 }
 async function diagnoseDeviceCodeFailure({ authority, clientId, scope }) {
   try {
@@ -37556,18 +37704,28 @@ async function diagnoseDeviceCodeFailure({ authority, clientId, scope }) {
   }
   return null;
 }
-async function getAccessToken({ tenantId, clientId, scope, accountName, fallbackCachePath }) {
+async function getAccessToken({ tenantId, clientId, scope, agentId }) {
   const authority = `https://login.microsoftonline.com/${tenantId}`;
-  const cachePlugin = await createCachePluginWithFallback(accountName, fallbackCachePath, log);
+  const legacyCache = {
+    accountName: agentCacheAccountName(agentId),
+    fallbackPath: tokenCachePath(agentId),
+    tenantId
+  };
+  const cachePlugin = await createCachePluginWithFallback(
+    tenantCacheAccountName(tenantId),
+    tokenCachePath(`tenant-${tenantId}`),
+    log,
+    legacyCache
+  );
   const app = new PublicClientApplication({
     auth: { clientId, authority },
     cache: { cachePlugin }
   });
-  const accounts = await app.getTokenCache().getAllAccounts();
-  if (accounts.length > 0) {
+  const account = pickAccount(await app.getTokenCache().getAllAccounts(), tenantId);
+  if (account) {
     try {
-      const result = await app.acquireTokenSilent({ scopes: [scope], account: accounts[0] });
-      log("Using cached token.");
+      const result = await app.acquireTokenSilent({ scopes: [scope], account });
+      log(`Using cached token (${account.username}).`);
       return result.accessToken;
     } catch {
     }
@@ -37779,13 +37937,12 @@ async function main() {
   }
   log(`Cloud: ${cloud}`);
   log(`Direct connect URL: ${directConnectUrl}`);
-  log("Authenticating (device code)...");
+  log("Authenticating...");
   const token = await getAccessToken({
     tenantId: config.tenantId,
     clientId,
     scope,
-    accountName: cacheAccountName(config.agentId),
-    fallbackCachePath: tokenCachePath(config.agentId)
+    agentId: config.agentId
   });
   if (args.clientId) {
     saveClientId({ agentId: config.agentId, tenantId: config.tenantId, cloud, clientId });

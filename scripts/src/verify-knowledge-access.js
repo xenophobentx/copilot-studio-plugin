@@ -46,6 +46,7 @@ const os = require("os");
 const path = require("path");
 const { PublicClientApplication } = require("@azure/msal-node");
 const { createSecureCachePlugin } = require("./secure-msal-cache");
+const { agentCacheAccountName, pickAccount, tenantCacheAccountName } = require("./msal-cache");
 
 // ---------------------------------------------------------------------------
 // Output helpers
@@ -168,13 +169,6 @@ function resolveClientId({ explicit, agentId, tenantId }) {
     // no saved config
   }
   return null;
-}
-
-// Reuse the same per-agent encrypted cache slot as chat so a single sign-in serves both. The
-// Graph token is cached under its own scopes within that account's MSAL cache.
-function cacheAccountName(agentId) {
-  const safe = (agentId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `chat-${safe}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,10 +358,11 @@ async function diagnoseDeviceCodeFailure({ authority, clientId, scopes }) {
 async function resolveSecureCachePlugin(
   accountName,
   warn = log,
-  cacheFactory = createSecureCachePlugin
+  cacheFactory = createSecureCachePlugin,
+  { legacyAccountName, tenantId } = {}
 ) {
   try {
-    return await cacheFactory(accountName);
+    return await cacheFactory(accountName, undefined, { legacyAccountName, tenantId, warn });
   } catch {
     warn(
       "Encrypted token storage is unavailable. Using an in-memory token cache for this run; " +
@@ -383,16 +378,23 @@ function buildMsalConfig({ clientId, authority, cachePlugin }) {
   return config;
 }
 
-async function getGraphToken({ tenantId, clientId, scopes, authorityHost, accountName }) {
+async function getGraphToken({ tenantId, clientId, scopes, authorityHost, agentId }) {
   const authority = `https://${authorityHost}/${tenantId}`;
-  const cachePlugin = await resolveSecureCachePlugin(accountName);
+  // Same per-tenant encrypted cache slot as chat, so a single sign-in serves both. The Graph token
+  // is cached under its own scopes within that account's MSAL cache.
+  const cachePlugin = await resolveSecureCachePlugin(
+    tenantCacheAccountName(tenantId),
+    log,
+    createSecureCachePlugin,
+    { legacyAccountName: agentCacheAccountName(agentId), tenantId }
+  );
   const app = new PublicClientApplication(buildMsalConfig({ clientId, authority, cachePlugin }));
 
-  const accounts = await app.getTokenCache().getAllAccounts();
-  if (accounts.length > 0) {
+  const account = pickAccount(await app.getTokenCache().getAllAccounts(), tenantId);
+  if (account) {
     try {
-      const result = await app.acquireTokenSilent({ scopes, account: accounts[0] });
-      log("Using cached token.");
+      const result = await app.acquireTokenSilent({ scopes, account });
+      log(`Using cached token (${account.username}).`);
       return result.accessToken;
     } catch {
       // fall through to device code
@@ -544,13 +546,13 @@ async function main() {
   }
 
   log(`Cloud: ${cloud} (Graph: ${graphHost})`);
-  log("Authenticating (device code)...");
+  log("Authenticating...");
   const token = await getGraphToken({
     tenantId,
     clientId,
     scopes,
     authorityHost,
-    accountName: cacheAccountName(agentId),
+    agentId,
   });
 
   log("Checking access via Microsoft Graph...");

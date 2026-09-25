@@ -80,6 +80,29 @@ test("falls back to an in-memory cache when secure persistence is unavailable", 
   assert.match(warnings[0], /in-memory token cache/i);
 });
 
+test("passes the old slot and tenant to the secure cache factory", async () => {
+  const calls = [];
+  const warn = () => {};
+  const plugin = await resolveSecureCachePlugin(
+    "chat-tenant-tenant-1",
+    warn,
+    async (...args) => {
+      calls.push(args);
+      return "plugin";
+    },
+    { legacyAccountName: "chat-agent-1", tenantId: "tenant-1" }
+  );
+
+  assert.equal(plugin, "plugin");
+  assert.deepEqual(calls, [
+    [
+      "chat-tenant-tenant-1",
+      undefined,
+      { legacyAccountName: "chat-agent-1", tenantId: "tenant-1", warn },
+    ],
+  ]);
+});
+
 test("omits MSAL persistence when secure storage is unavailable", () => {
   assert.deepEqual(
     buildMsalConfig({

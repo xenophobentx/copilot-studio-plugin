@@ -224,9 +224,9 @@ skill exposes this as an **opt-in** step backed by `scripts/verify-knowledge-acc
   Graph tokens, and an id preauthorized for the Copilot Studio / Power Platform API is *not*
   authorized for Graph). It is best-effort — if it isn't configured, skip it and add the source
   anyway.
-- **Token storage:** reuse the per-agent cache only when OS-backed encrypted persistence is
-  available. If secure persistence cannot be initialized, the check uses an in-memory cache and
-  writes no Graph credentials to disk.
+- **Token storage:** reuse the per-tenant cache shared with `/chat` only when OS-backed encrypted
+  persistence is available. If secure persistence cannot be initialized, the check uses an
+  in-memory cache and writes no Graph credentials to disk.
 - **National clouds:** SharePoint hosts in US Government, DoD, and China automatically select the
   corresponding Microsoft Graph and Entra authority hosts. Use `--cloud` only when automatic
   inference is insufficient.
