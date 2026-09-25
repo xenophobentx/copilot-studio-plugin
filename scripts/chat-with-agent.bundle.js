@@ -36980,6 +36980,19 @@ var require_msal_cache = __commonJS({
   }
 });
 
+// src/publish-command.js
+var require_publish_command = __commonJS({
+  "src/publish-command.js"(exports2, module2) {
+    var SHELL_SAFE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+    function publishCommandFor2({ agentId, schemaName, environmentId }) {
+      const bot = agentId || schemaName;
+      if (!SHELL_SAFE.test(bot || "") || !SHELL_SAFE.test(environmentId || "")) return null;
+      return `pac copilot publish --bot "${bot}" --environment "${environmentId}"`;
+    }
+    module2.exports = { publishCommandFor: publishCommandFor2 };
+  }
+});
+
 // src/response-format.js
 var require_response_format = __commonJS({
   "src/response-format.js"(exports2, module2) {
@@ -37270,6 +37283,7 @@ var { PublicClientApplication } = require_msal_node();
 var { CopilotStudioClient } = require_src6();
 var { Activity } = require_src5();
 var { createCachePluginWithFallback } = require_msal_cache();
+var { publishCommandFor } = require_publish_command();
 var { summarizeTurn } = require_response_format();
 var { createLiveRenderer } = require_terminal_render();
 var CLI_RECOGNIZER_KINDS = ["CLIAgentRecognizer", "CLICopilotRecognizer"];
@@ -37602,7 +37616,7 @@ function conversationsUrl(directConnectUrl) {
   u.pathname = u.pathname.replace(/\/+$/, "") + "/conversations";
   return u.toString();
 }
-async function preflightRuntime({ directConnectUrl, token, schemaName, agentId }) {
+async function preflightRuntime({ directConnectUrl, token, schemaName, agentId, environmentId }) {
   const url = conversationsUrl(directConnectUrl);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25e3);
@@ -37641,9 +37655,11 @@ async function preflightRuntime({ directConnectUrl, token, schemaName, agentId }
   const snippet = bodyText.trim().split("\n")[0].slice(0, 200);
   const withSnippet = snippet ? `: ${snippet}` : "";
   if (res.status === 404) {
+    const publishCommand = publishCommandFor({ agentId, schemaName, environmentId });
+    const shownCommand = publishCommand || "pac copilot publish --bot <AgentId or schema name> --environment <EnvironmentId>";
     die(
-      `The agenticruntime has no agent at this endpoint (HTTP 404${withSnippet}). The most common cause is that the agent '${schemaName}' has not been published (a fresh clone is unpublished until you publish it). Publish it in Copilot Studio, or run \`pac copilot publish --bot-id ${agentId}\`, then retry.`,
-      { httpStatus: 404, schemaName, agentId, endpoint: url }
+      `The agenticruntime has no agent at this endpoint (HTTP 404${withSnippet}). The most common cause is that the agent '${schemaName}' has not been published (a fresh clone is unpublished until you publish it). Publish it in Copilot Studio, or run \`${shownCommand}\`, then retry.`,
+      { httpStatus: 404, schemaName, agentId, environmentId, publishCommand, endpoint: url }
     );
   }
   if (res.status === 401) {
@@ -37671,6 +37687,7 @@ async function chat({
   token,
   schemaName,
   agentId,
+  environmentId,
   onActivity
 }) {
   const settings = { directConnectUrl, cloud };
@@ -37680,7 +37697,7 @@ async function chat({
   };
   const startActivities = [];
   if (!conversationId) {
-    await preflightRuntime({ directConnectUrl, token, schemaName, agentId });
+    await preflightRuntime({ directConnectUrl, token, schemaName, agentId, environmentId });
     log("Starting new conversation...");
     for await (const activity of client.startConversationStreaming({
       emitStartConversationEvent: true
@@ -37801,6 +37818,7 @@ async function main() {
       token,
       schemaName: config.schemaName,
       agentId: config.agentId,
+      environmentId: config.environmentId,
       onActivity: renderer ? (a) => renderer.onActivity(a) : void 0
     });
     const conversationId = result.conversationId;

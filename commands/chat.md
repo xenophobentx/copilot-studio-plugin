@@ -31,8 +31,9 @@ Read `path.join(os.homedir(), '.copilot-studio-cli', 'plugin-paths.json')` to ge
 
 ### 2. Verify the PAC CLI prerequisite (non-blocking)
 
-Run `pac` and read the PAC CLI version. Chat itself does not call `pac`, but a recent PAC CLI is how
-the user cloned the agent. Make one attempt; continue even if it cannot be read.
+Run `pac` and read the PAC CLI version. Chat itself only calls `pac` to publish an unpublished agent
+(step 6, after the user confirms), but a recent PAC CLI is how the user cloned the agent. Make one
+attempt; continue even if it cannot be read.
 
 ### 3. Locate the agent and confirm it is a CLI agent (blocking)
 
@@ -157,11 +158,29 @@ final `text` is the answer, `reasoning` is the agent's thinking, and `steps` are
 - If `status` is `"error"`, surface the `error` message. For `needsClientId`, run the setup workflow
   (step 4). For a non-CLI `recognizerKind`, stop per the gate (step 3). If the error carries
   `httpStatus: 404`, the most likely cause is that the agent is **not published** (a fresh clone stays
-  unpublished until published). Explain this and **offer to publish it for the user**: on their
-  confirmation, run `pac copilot publish --bot-id <AgentId>` (the `AgentId` is in the error payload and
-  in `chat-config.json`), wait for it to finish, then automatically retry the same chat turn. Do not
-  publish without confirmation, and note that 404 can occasionally have other causes (wrong
-  environment/schema) if publishing does not resolve it.
+  unpublished until published). Explain this and **offer to publish it for the user**, with the same
+  warning the manage agent gives: "This will publish the agent and make it live for all users it's
+  shared with. Should I proceed?" If the agent may already be live, add that publishing makes its
+  current draft live, including unpublished edits. Do not publish without confirmation.
+  - On confirmation, run the `publishCommand` from the error payload
+    (`pac copilot publish --bot "<AgentId or schema name>" --environment "<EnvironmentId>"`). The
+    host may ask for permission first: `allowed-tools` only pre-approves the bare `pac` check.
+  - If `publishCommand` is `null`, an id in `.mcs/conn.json` or `settings.mcs.yml` contains
+    characters that are not safe in a shell. Do not build the command yourself and do not edit
+    `.mcs/conn.json` (it is CLI-managed); tell the user the workspace looks altered and suggest
+    cloning the agent again.
+  - If publish exits 0, retry the same chat turn.
+  - If publish exits non-zero, show the PAC output. If it is the crash
+    `Exception Type: System.ArgumentException` (microsoft/powerplatform-build-tools#1307, seen with
+    PAC 2.12.2), tell the user that this crash usually happens after the publish completed, do not
+    run publish again, and retry the chat turn. For any other error (authentication or profile,
+    permissions, unknown bot or environment), do not retry the chat turn, and help the user resolve
+    it (for example `pac auth create`) before publishing again.
+  - The runtime can keep returning 404 for 10-20 seconds after publish returns. If the retry still
+    gets a 404, retry the chat turn a few more times over about a minute before telling the user
+    that the agent is still not reachable. After the `ArgumentException` crash, that can mean the
+    publish did not complete: suggest checking the publish status in Copilot Studio. Otherwise a
+    lasting 404 can have other causes (wrong environment or schema).
 
 **Output modes.** Add `--raw` to get the full, unfiltered activity payloads (start + turn) for
 debugging. Add `--pretty` for a colorized, live terminal chat experience (reasoning in cyan, tool
@@ -184,9 +203,10 @@ same `--conversation-id`, until the user is done.
   `404` (unpublished agent) fails fast with a clear "publish the agent" message instead of hanging.
   This works around microsoft/Agents-for-js#1198, where the streaming client retries a non-2xx
   forever and never returns.
-- **What this command does not do.** It does not author, edit, publish, or manage the agent, and it
-  does not use Direct Line. It only chats with an already-published CLI agent. Use `/migrate` or the
-  manage agent for those tasks.
+- **What this command does not do.** It does not author, edit, or manage the agent, and it does not
+  use Direct Line. The one change it can make is `pac copilot publish`, on the user's confirmation,
+  when a 404 shows the agent is unpublished. Otherwise it only chats with an already-published CLI
+  agent. Use `/migrate` or the manage agent for those tasks.
 - **Auth footprint.** Access and refresh tokens are cached **per-agent in OS-native encrypted
   storage** (macOS Keychain / Windows DPAPI / Linux libsecret) via `@azure/msal-node-extensions`;
   the on-disk `~/.copilot-studio-cli/chat-<AgentId>.cache.json` holds no readable token. The native

@@ -41,6 +41,7 @@ const { PublicClientApplication } = require("@azure/msal-node");
 const { CopilotStudioClient } = require("@microsoft/agents-copilotstudio-client");
 const { Activity } = require("@microsoft/agents-activity");
 const { createCachePluginWithFallback } = require("./msal-cache");
+const { publishCommandFor } = require("./publish-command");
 const { summarizeTurn } = require("./response-format");
 const { createLiveRenderer } = require("./terminal-render");
 
@@ -495,7 +496,7 @@ function conversationsUrl(directConnectUrl) {
 // single plain POST to the conversations endpoint and inspect the HTTP status before
 // handing off to the streaming client. Note: a 200 here starts a throwaway conversation
 // server-side (POST is not read-only), which is acceptable for a test/dev tool.
-async function preflightRuntime({ directConnectUrl, token, schemaName, agentId }) {
+async function preflightRuntime({ directConnectUrl, token, schemaName, agentId, environmentId }) {
   const url = conversationsUrl(directConnectUrl);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25000);
@@ -541,12 +542,16 @@ async function preflightRuntime({ directConnectUrl, token, schemaName, agentId }
   const withSnippet = snippet ? `: ${snippet}` : "";
 
   if (res.status === 404) {
+    const publishCommand = publishCommandFor({ agentId, schemaName, environmentId });
+    const shownCommand =
+      publishCommand ||
+      "pac copilot publish --bot <AgentId or schema name> --environment <EnvironmentId>";
     die(
       `The agenticruntime has no agent at this endpoint (HTTP 404${withSnippet}). ` +
         `The most common cause is that the agent '${schemaName}' has not been published ` +
         `(a fresh clone is unpublished until you publish it). Publish it in Copilot Studio, ` +
-        `or run \`pac copilot publish --bot-id ${agentId}\`, then retry.`,
-      { httpStatus: 404, schemaName, agentId, endpoint: url }
+        `or run \`${shownCommand}\`, then retry.`,
+      { httpStatus: 404, schemaName, agentId, environmentId, publishCommand, endpoint: url }
     );
   }
   if (res.status === 401) {
@@ -578,6 +583,7 @@ async function chat({
   token,
   schemaName,
   agentId,
+  environmentId,
   onActivity,
 }) {
   const settings = { directConnectUrl, cloud };
@@ -587,7 +593,7 @@ async function chat({
 
   const startActivities = [];
   if (!conversationId) {
-    await preflightRuntime({ directConnectUrl, token, schemaName, agentId });
+    await preflightRuntime({ directConnectUrl, token, schemaName, agentId, environmentId });
     log("Starting new conversation...");
     for await (const activity of client.startConversationStreaming({
       emitStartConversationEvent: true,
@@ -742,6 +748,7 @@ async function main() {
       token,
       schemaName: config.schemaName,
       agentId: config.agentId,
+      environmentId: config.environmentId,
       onActivity: renderer ? (a) => renderer.onActivity(a) : undefined,
     });
 
