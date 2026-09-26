@@ -145,20 +145,44 @@ async function seedFromLegacyCache({ target, legacy, tenantId, lockPath, warn, l
   }
 }
 
+// createPersistence() checks the store by writing, reading and deleting one fixed validation entry
+// that every process shares, so two chat runs starting together can fail that check even though
+// the store works. Retry a failed check (CachePersistenceError) a few times with jitter before
+// treating encrypted storage as unavailable. That error covers every failed check, so a store that
+// really is broken also waits up to about a second before the fallback. Other errors are not
+// retried.
+//
+// On Linux, createPersistence() itself swallows a failed check and switches to a plaintext file
+// when usePlaintextFileOnLinux is set, so the retries run with it off and the plaintext file is
+// allowed only after the last attempt.
 async function createEncryptedPersistence(
   extensions,
   accountName,
   usePlaintextFileOnLinux,
-  cacheDir
+  cacheDir,
+  { attempts = 4, delayMs = 100, platform = process.platform } = {}
 ) {
   const { PersistenceCreator, DataProtectionScope } = extensions;
-  return PersistenceCreator.createPersistence({
-    cachePath: cacheFilePath(accountName, cacheDir),
-    dataProtectionScope: DataProtectionScope.CurrentUser,
-    serviceName: SERVICE_NAME,
-    accountName,
-    usePlaintextFileOnLinux,
-  });
+  const create = (plaintextOnLinux) =>
+    PersistenceCreator.createPersistence({
+      cachePath: cacheFilePath(accountName, cacheDir),
+      dataProtectionScope: DataProtectionScope.CurrentUser,
+      serviceName: SERVICE_NAME,
+      accountName,
+      usePlaintextFileOnLinux: plaintextOnLinux,
+    });
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await create(false);
+    } catch (e) {
+      if (!e || e.errorCode !== "CachePersistenceError") throw e;
+      if (attempt >= attempts) {
+        if (platform === "linux" && usePlaintextFileOnLinux) return create(true);
+        throw e;
+      }
+      await sleep(delayMs * attempt + Math.random() * delayMs);
+    }
+  }
 }
 
 /**
@@ -173,6 +197,7 @@ async function createEncryptedPersistence(
  * @param {(msg: string) => void} [options.warn]
  * @param {() => object} [options.loadDependencies] For tests.
  * @param {string} [options.cacheDir] For tests.
+ * @param {{ attempts?: number, delayMs?: number, platform?: string }} [options.retry] For tests.
  */
 async function createCachePlugin(accountName, options = {}) {
   const {
@@ -182,13 +207,15 @@ async function createCachePlugin(accountName, options = {}) {
     warn,
     loadDependencies = () => require("@azure/msal-node-extensions"),
     cacheDir = CACHE_DIR,
+    retry,
   } = options;
   const extensions = loadDependencies();
   const persistence = await createEncryptedPersistence(
     extensions,
     accountName,
     usePlaintextFileOnLinux,
-    cacheDir
+    cacheDir,
+    retry
   );
 
   // Open the legacy slot only while the tenant slot has no account and only if the legacy slot was
@@ -206,11 +233,13 @@ async function createCachePlugin(accountName, options = {}) {
     }
     try {
       if (!signedIn) {
+        // One attempt only: if the old slot can't be opened, the user just signs in again.
         const legacy = await createEncryptedPersistence(
           extensions,
           legacyAccountName,
           usePlaintextFileOnLinux,
-          cacheDir
+          cacheDir,
+          { ...retry, attempts: 1 }
         );
         await seedFromLegacyCache({
           target: persistence,
@@ -292,11 +321,15 @@ async function createCachePluginWithFallback(
     });
   } catch (e) {
     if (typeof warn === "function") {
+      const detail = e && e.message ? e.message : e;
       warn(
-        "Encrypted token storage unavailable (@azure/msal-node-extensions could not be " +
-          `loaded: ${e && e.message ? e.message : e}). Falling back to a plaintext token ` +
-          "cache. Run a fresh session so the plugin can install its native dependencies, " +
-          "or reinstall the plugin, to enable OS-keychain encryption."
+        e && e.errorCode === "CachePersistenceError"
+          ? `Encrypted token storage failed its check after several attempts (${detail}). ` +
+              "Falling back to a plaintext token cache."
+          : "Encrypted token storage unavailable (@azure/msal-node-extensions could not be " +
+              `loaded: ${detail}). Falling back to a plaintext token cache. Run a fresh ` +
+              "session so the plugin can install its native dependencies, or reinstall the " +
+              "plugin, to enable OS-keychain encryption."
       );
     }
     if (legacy.fallbackPath && legacy.fallbackPath !== fallbackPath) {

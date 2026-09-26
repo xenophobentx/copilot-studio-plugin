@@ -37003,15 +37003,27 @@ var require_msal_cache = __commonJS({
         return false;
       }
     }
-    async function createEncryptedPersistence(extensions, accountName, usePlaintextFileOnLinux, cacheDir) {
+    async function createEncryptedPersistence(extensions, accountName, usePlaintextFileOnLinux, cacheDir, { attempts = 4, delayMs = 100, platform = process.platform } = {}) {
       const { PersistenceCreator, DataProtectionScope } = extensions;
-      return PersistenceCreator.createPersistence({
+      const create = (plaintextOnLinux) => PersistenceCreator.createPersistence({
         cachePath: cacheFilePath(accountName, cacheDir),
         dataProtectionScope: DataProtectionScope.CurrentUser,
         serviceName: SERVICE_NAME,
         accountName,
-        usePlaintextFileOnLinux
+        usePlaintextFileOnLinux: plaintextOnLinux
       });
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await create(false);
+        } catch (e) {
+          if (!e || e.errorCode !== "CachePersistenceError") throw e;
+          if (attempt >= attempts) {
+            if (platform === "linux" && usePlaintextFileOnLinux) return create(true);
+            throw e;
+          }
+          await sleep(delayMs * attempt + Math.random() * delayMs);
+        }
+      }
     }
     async function createCachePlugin(accountName, options = {}) {
       const {
@@ -37020,14 +37032,16 @@ var require_msal_cache = __commonJS({
         usePlaintextFileOnLinux = true,
         warn,
         loadDependencies = () => require("@azure/msal-node-extensions"),
-        cacheDir = CACHE_DIR
+        cacheDir = CACHE_DIR,
+        retry
       } = options;
       const extensions = loadDependencies();
       const persistence = await createEncryptedPersistence(
         extensions,
         accountName,
         usePlaintextFileOnLinux,
-        cacheDir
+        cacheDir,
+        retry
       );
       if (legacyAccountName && legacyAccountName !== accountName && fs2.existsSync(cacheFilePath(legacyAccountName, cacheDir))) {
         let signedIn = false;
@@ -37041,7 +37055,8 @@ var require_msal_cache = __commonJS({
               extensions,
               legacyAccountName,
               usePlaintextFileOnLinux,
-              cacheDir
+              cacheDir,
+              { ...retry, attempts: 1 }
             );
             await seedFromLegacyCache({
               target: persistence,
@@ -37096,8 +37111,9 @@ var require_msal_cache = __commonJS({
         });
       } catch (e) {
         if (typeof warn === "function") {
+          const detail = e && e.message ? e.message : e;
           warn(
-            `Encrypted token storage unavailable (@azure/msal-node-extensions could not be loaded: ${e && e.message ? e.message : e}). Falling back to a plaintext token cache. Run a fresh session so the plugin can install its native dependencies, or reinstall the plugin, to enable OS-keychain encryption.`
+            e && e.errorCode === "CachePersistenceError" ? `Encrypted token storage failed its check after several attempts (${detail}). Falling back to a plaintext token cache.` : `Encrypted token storage unavailable (@azure/msal-node-extensions could not be loaded: ${detail}). Falling back to a plaintext token cache. Run a fresh session so the plugin can install its native dependencies, or reinstall the plugin, to enable OS-keychain encryption.`
           );
         }
         if (legacy.fallbackPath && legacy.fallbackPath !== fallbackPath) {

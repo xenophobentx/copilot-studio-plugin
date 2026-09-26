@@ -36,6 +36,10 @@ const EMPTY_MSAL_CACHE = JSON.stringify({
   AppMetadata: {},
 });
 
+function persistenceError(errorCode, message) {
+  return Object.assign(new Error(`${errorCode}: ${message}`), { errorCode });
+}
+
 function memoryStore(initial = null) {
   const store = {
     value: initial,
@@ -254,7 +258,6 @@ test("encrypted cache: seeds the tenant slot from the agent's old slot", async (
   });
 
   assert.equal(plugin.persistence.options.accountName, tenantName);
-  assert.equal(plugin.persistence.options.usePlaintextFileOnLinux, true);
   assert.equal(extensions.slots[tenantName], SIGNED_IN);
   assert.equal(extensions.slots[legacyName], SIGNED_IN);
   assert.equal(fs.existsSync(path.join(cacheDir, `${tenantName}.cache.json.lockfile`)), false);
@@ -297,6 +300,67 @@ test("encrypted cache: leaves the old slot closed once the tenant slot has an ac
   assert.equal(extensions.slots[tenantName], OTHER_SIGNED_IN);
 });
 
+test("encrypted cache: retries a storage check that fails while another run holds it", async (t) => {
+  const cacheDir = tempDir(t);
+  const extensions = fakeExtensions();
+  const createPersistence = extensions.PersistenceCreator.createPersistence;
+  let calls = 0;
+  extensions.PersistenceCreator.createPersistence = async (options) => {
+    calls += 1;
+    if (calls <= 2) throw persistenceError("CachePersistenceError", "An unknown error occurred.");
+    return createPersistence(options);
+  };
+
+  const plugin = await createCachePlugin(tenantCacheAccountName("tenant-1"), {
+    loadDependencies: () => extensions,
+    cacheDir,
+    retry: { attempts: 4, delayMs: 1 },
+  });
+
+  assert.equal(calls, 3);
+  assert.equal(plugin.persistence.options.accountName, tenantCacheAccountName("tenant-1"));
+});
+
+test("encrypted cache: gives up after the last retry so the caller can fall back", async (t) => {
+  const cacheDir = tempDir(t);
+  const extensions = fakeExtensions();
+  let calls = 0;
+  extensions.PersistenceCreator.createPersistence = async () => {
+    calls += 1;
+    throw persistenceError("CachePersistenceError", "keychain unavailable");
+  };
+
+  await assert.rejects(
+    createCachePlugin(tenantCacheAccountName("tenant-1"), {
+      loadDependencies: () => extensions,
+      cacheDir,
+      retry: { attempts: 3, delayMs: 1 },
+    }),
+    /keychain unavailable/
+  );
+  assert.equal(calls, 3);
+});
+
+test("encrypted cache: does not retry errors other than the storage check", async (t) => {
+  const cacheDir = tempDir(t);
+  const extensions = fakeExtensions();
+  let calls = 0;
+  extensions.PersistenceCreator.createPersistence = async () => {
+    calls += 1;
+    throw persistenceError("EACCES", "permission denied");
+  };
+
+  await assert.rejects(
+    createCachePlugin(tenantCacheAccountName("tenant-1"), {
+      loadDependencies: () => extensions,
+      cacheDir,
+      retry: { attempts: 3, delayMs: 1 },
+    }),
+    /permission denied/
+  );
+  assert.equal(calls, 1);
+});
+
 test("encrypted cache: seeds even when the first read of the tenant slot fails", async (t) => {
   const cacheDir = tempDir(t);
   const legacyName = agentCacheAccountName("agent-1");
@@ -327,6 +391,53 @@ test("encrypted cache: seeds even when the first read of the tenant slot fails",
 
   assert.equal(extensions.slots[tenantName], SIGNED_IN);
   assert.deepEqual(warnings, []);
+});
+
+function failingCheckExtensions() {
+  const extensions = fakeExtensions();
+  const createPersistence = extensions.PersistenceCreator.createPersistence;
+  const calls = [];
+  extensions.PersistenceCreator.createPersistence = async (options) => {
+    calls.push(options.usePlaintextFileOnLinux);
+    if (!options.usePlaintextFileOnLinux) {
+      throw persistenceError("CachePersistenceError", "An unknown error occurred.");
+    }
+    return createPersistence(options);
+  };
+  return { extensions, calls };
+}
+
+test("encrypted cache on Linux: allows the plaintext file only after the last retry", async (t) => {
+  const { extensions, calls } = failingCheckExtensions();
+
+  const plugin = await createCachePlugin(tenantCacheAccountName("tenant-1"), {
+    loadDependencies: () => extensions,
+    cacheDir: tempDir(t),
+    retry: { attempts: 3, delayMs: 1, platform: "linux" },
+  });
+
+  assert.deepEqual(calls, [false, false, false, true]);
+  assert.equal(plugin.persistence.options.usePlaintextFileOnLinux, true);
+});
+
+test("encrypted cache: never allows the plaintext file off Linux or for the secure cache", async (t) => {
+  for (const [platform, usePlaintextFileOnLinux] of [
+    ["darwin", true],
+    ["win32", true],
+    ["linux", false],
+  ]) {
+    const { extensions, calls } = failingCheckExtensions();
+    await assert.rejects(
+      createCachePlugin(tenantCacheAccountName("tenant-1"), {
+        usePlaintextFileOnLinux,
+        loadDependencies: () => extensions,
+        cacheDir: tempDir(t),
+        retry: { attempts: 2, delayMs: 1, platform },
+      }),
+      /CachePersistenceError/
+    );
+    assert.deepEqual(calls, [false, false], platform);
+  }
 });
 
 test("secure cache: seeds from the old slot and keeps Linux plaintext disabled", async (t) => {
@@ -424,4 +535,55 @@ test("picks the cached account signed in to this tenant", () => {
   assert.equal(pickAccount([home], "tenant-1"), home);
   assert.equal(pickAccount([], "tenant-1"), null);
   assert.equal(pickAccount(undefined, "tenant-1"), null);
+});
+
+test("opens the old slot with a single storage check", async (t) => {
+  const cacheDir = tempDir(t);
+  const legacyName = agentCacheAccountName("agent-1");
+  const tenantName = tenantCacheAccountName("tenant-1");
+  fs.writeFileSync(path.join(cacheDir, `${legacyName}.cache.json`), "{}");
+  const extensions = fakeExtensions();
+  const createPersistence = extensions.PersistenceCreator.createPersistence;
+  const calls = [];
+  extensions.PersistenceCreator.createPersistence = async (options) => {
+    calls.push(options.accountName);
+    if (options.accountName === legacyName) {
+      throw persistenceError("CachePersistenceError", "An unknown error occurred.");
+    }
+    return createPersistence(options);
+  };
+
+  await createCachePlugin(tenantName, {
+    legacyAccountName: legacyName,
+    loadDependencies: () => extensions,
+    cacheDir,
+    warn: () => {},
+    retry: { attempts: 4, delayMs: 1 },
+  });
+
+  assert.deepEqual(calls, [tenantName, legacyName]);
+});
+
+test("names a failed storage check, not a missing module, when falling back", async (t) => {
+  const warnings = [];
+  const dir = tempDir(t);
+
+  await createCachePluginWithFallback(
+    tenantCacheAccountName("tenant-1"),
+    path.join(dir, "tenant.json"),
+    (message) => warnings.push(message),
+    {},
+    () => ({
+      ...fakeExtensions(),
+      PersistenceCreator: {
+        createPersistence: async () => {
+          throw persistenceError("CachePersistenceError", "keychain locked");
+        },
+      },
+    })
+  );
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failed its check/);
+  assert.doesNotMatch(warnings[0], /could not be loaded/);
 });
